@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PAYLOAD SHELL DATABASE - Stores Passwords & Payloads
-Login protected | Save everything
+Login protected | Save everything | No errors
 """
 
 import os
@@ -10,23 +10,25 @@ import sqlite3
 import hashlib
 import getpass
 import json
-import base64
+import time
 from datetime import datetime
 
-# Colors
+# Colors - Fixed all attributes
 class Colors:
+    RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
     BLUE = '\033[94m'
     CYAN = '\033[96m'
-    RED = '\033[91m'
+    WHITE = '\033[97m'
     PURPLE = '\033[95m'
     BOLD = '\033[1m'
+    DIM = '\033[2m'
     RESET = '\033[0m'
 
 class PayloadDatabase:
     def __init__(self):
-        self.db_path = "payload_data.db"
+        self.db_path = os.path.join(os.getcwd(), "payload_data.db")
         self.current_user = None
         self.init_db()
         
@@ -131,7 +133,7 @@ class PayloadDatabase:
         os.system('clear' if os.name == 'posix' else 'cls')
         
     def print_menu(self):
-        """Print main menu"""
+        """Print main menu with database location at top"""
         # Get counts
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -144,6 +146,8 @@ class PayloadDatabase:
         menu = f"""
 {Colors.CYAN}{'='*60}{Colors.RESET}
 {Colors.BOLD}         PAYLOAD DATABASE{Colors.RESET}
+{Colors.CYAN}{'='*60}{Colors.RESET}
+{Colors.DIM}[ Database: {self.db_path} ]{Colors.RESET}
 {Colors.CYAN}{'='*60}{Colors.RESET}
 {Colors.GREEN}[+] User: {self.current_user['username']}{Colors.RESET}
 {Colors.YELLOW}[+] Payloads: {payload_count}{Colors.RESET}
@@ -158,6 +162,7 @@ class PayloadDatabase:
 {Colors.GREEN}6.{Colors.RESET} View Captured Passwords
 {Colors.GREEN}7.{Colors.RESET} Search
 {Colors.GREEN}8.{Colors.RESET} Export All Data
+{Colors.GREEN}9.{Colors.RESET} Change Password
 {Colors.GREEN}0.{Colors.RESET} Logout
 
 {Colors.CYAN}{'='*60}{Colors.RESET}
@@ -245,13 +250,6 @@ class PayloadDatabase:
         print(f"{Colors.GREEN}Payload:{Colors.RESET}\n{p[5]}")
         print(f"{Colors.CYAN}{'='*60}{Colors.RESET}\n")
         
-        # Option to copy
-        copy = input(f"{Colors.WHITE}Copy to clipboard? (y/n): {Colors.RESET}")
-        if copy.lower() == 'y':
-            import subprocess
-            subprocess.run("pbcopy", input=p[5].encode(), text=True)
-            print(f"{Colors.GREEN}[+] Copied!{Colors.RESET}")
-            
         input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
         
     def delete_payload(self):
@@ -439,13 +437,12 @@ class PayloadDatabase:
                 self.search()
             elif choice == "8":
                 self.export()
-            elif choice == "passwd":
+            elif choice == "9":
                 self.change_password()
             else:
                 print(f"{Colors.RED}[-] Invalid choice{Colors.RESET}")
                 time.sleep(1)
 
 if __name__ == "__main__":
-    import time
     db = PayloadDatabase()
     db.run()
