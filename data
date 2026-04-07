@@ -1,373 +1,451 @@
-#!/bin/bash
+#!/usr/bin/env python3
+"""
+PAYLOAD SHELL DATABASE - Stores Passwords & Payloads
+Login protected | Save everything
+"""
 
-# Database directory
-DB_DIR="$HOME/.payload_db"
-USERS_FILE="$DB_DIR/users.txt"           # Main system users
-PAYLOADS_FILE="$DB_DIR/payloads.txt"     # Payload information
-PAYLOAD_CREDS_FILE="$DB_DIR/payload_creds.txt"  # Each payload's login/password
+import os
+import sys
+import sqlite3
+import hashlib
+import getpass
+import json
+import base64
+from datetime import datetime
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors
+class Colors:
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    RED = '\033[91m'
+    PURPLE = '\033[95m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
 
-# Initialize database
-init_db() {
-    mkdir -p "$DB_DIR"
-    
-    # Create files with headers if they don't exist
-    if [ ! -f "$USERS_FILE" ]; then
-        echo "# username:hashed_password:created_at:last_login" > "$USERS_FILE"
-    fi
-    
-    if [ ! -f "$PAYLOADS_FILE" ]; then
-        echo "# payload_id|payload_name|type|port|status|owner|created_at|last_connected" > "$PAYLOADS_FILE"
-    fi
-    
-    if [ ! -f "$PAYLOAD_CREDS_FILE" ]; then
-        echo "# payload_id|service_username|service_password|notes" > "$PAYLOAD_CREDS_FILE"
-    fi
-    
-    chmod 700 "$DB_DIR"
-    chmod 600 "$USERS_FILE" "$PAYLOADS_FILE" "$PAYLOAD_CREDS_FILE"
-    
-    echo -e "${GREEN}✅ Database initialized at $DB_DIR${NC}"
-}
-
-# Hash password with salt
-hash_password() {
-    local password=$1
-    local salt=$(openssl rand -base64 16)
-    local hash=$(echo -n "$password$salt" | sha256sum | cut -d' ' -f1)
-    echo "$salt:$hash"
-}
-
-# Verify password
-verify_password() {
-    local password=$1
-    local stored=$2
-    local salt=$(echo "$stored" | cut -d: -f1)
-    local expected_hash=$(echo "$stored" | cut -d: -f2)
-    local actual_hash=$(echo -n "$password$salt" | sha256sum | cut -d' ' -f1)
-    [ "$actual_hash" = "$expected_hash" ]
-}
-
-# Add new system user
-add_user() {
-    echo -e "${BLUE}=== Add New System User ===${NC}"
-    read -p "Username: " username
-    
-    # Check if user exists
-    if grep -q "^$username:" "$USERS_FILE" 2>/dev/null; then
-        echo -e "${RED}❌ User already exists!${NC}"
-        return 1
-    fi
-    
-    read -sp "Password: " password
-    echo
-    read -sp "Confirm password: " password2
-    echo
-    
-    if [ "$password" != "$password2" ]; then
-        echo -e "${RED}❌ Passwords don't match!${NC}"
-        return 1
-    fi
-    
-    if [ ${#password} -lt 4 ]; then
-        echo -e "${RED}❌ Password must be at least 4 characters!${NC}"
-        return 1
-    fi
-    
-    local hashed=$(hash_password "$password")
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$username:$hashed:$timestamp:never" >> "$USERS_FILE"
-    
-    echo -e "${GREEN}✅ User $username added successfully!${NC}"
-}
-
-# Login system
-login() {
-    local attempts=0
-    local max_attempts=3
-    
-    while [ $attempts -lt $max_attempts ]; do
-        echo -e "${BLUE}=== Login ===${NC}"
-        read -p "Username: " username
-        read -sp "Password: " password
-        echo
+class PayloadDatabase:
+    def __init__(self):
+        self.db_path = "payload_data.db"
+        self.current_user = None
+        self.init_db()
         
-        local user_line=$(grep "^$username:" "$USERS_FILE" 2>/dev/null)
+    def init_db(self):
+        """Initialize all tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        if [ -n "$user_line" ]; then
-            local stored_hash=$(echo "$user_line" | cut -d: -f2)
-            if verify_password "$password" "$stored_hash"; then
-                echo -e "${GREEN}✅ Login successful!${NC}"
-                # Update last login
-                local now=$(date '+%Y-%m-%d %H:%M:%S')
-                sed -i "s/^$username:.*:.*:.*$/$username:$stored_hash:$(echo "$user_line" | cut -d: -f3):$now/" "$USERS_FILE"
-                CURRENT_USER="$username"
-                return 0
-            fi
-        fi
+        # Users table (for login)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
-        attempts=$((attempts + 1))
-        echo -e "${RED}❌ Login failed! ($attempts/$max_attempts attempts)${NC}"
+        # Payloads table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS payloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT,
+                lhost TEXT,
+                lport INTEGER,
+                payload TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT
+            )
+        ''')
         
-        if [ $attempts -eq $max_attempts ]; then
-            echo -e "${RED}🔒 Too many failed attempts. Exiting...${NC}"
-            exit 1
-        fi
-    done
-}
-
-# Add new payload with its own credentials
-add_payload() {
-    echo -e "${BLUE}=== Add New Payload ===${NC}"
-    
-    read -p "Payload name: " payload_name
-    read -p "Payload type (meterpreter/shell/ssh/web): " payload_type
-    read -p "IP/Hostname: " payload_host
-    read -p "Port: " payload_port
-    
-    # Validate port
-    if [[ ! "$payload_port" =~ ^[0-9]+$ ]] || [ "$payload_port" -lt 1 ] || [ "$payload_port" -gt 65535 ]; then
-        echo -e "${RED}❌ Invalid port number!${NC}"
-        return 1
-    fi
-    
-    echo -e "${YELLOW}--- Credentials for this payload ---${NC}"
-    read -p "Service username (e.g., root, admin): " service_user
-    read -sp "Service password: " service_pass
-    echo
-    read -p "Additional notes (optional): " notes
-    
-    # Generate unique payload ID
-    payload_id=$(openssl rand -hex 8)
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    # Save payload info
-    echo "$payload_id|$payload_name|$payload_type|$payload_port|disconnected|$CURRENT_USER|$timestamp|never" >> "$PAYLOADS_FILE"
-    
-    # Save payload credentials (encrypted with base64 for basic protection)
-    local encoded_pass=$(echo -n "$service_pass" | base64)
-    echo "$payload_id|$service_user|$encoded_pass|$notes" >> "$PAYLOAD_CREDS_FILE"
-    
-    echo -e "${GREEN}✅ Payload added successfully!${NC}"
-    echo -e "${YELLOW}Payload ID: $payload_id${NC}"
-}
-
-# List all payloads with their credentials
-list_payloads() {
-    echo -e "${BLUE}=== All Payloads ===${NC}"
-    
-    if [ ! -s "$PAYLOADS_FILE" ] || [ $(cat "$PAYLOADS_FILE" | wc -l) -le 1 ]; then
-        echo -e "${YELLOW}No payloads found${NC}"
-        return
-    fi
-    
-    echo -e "${GREEN}Payloads owned by you:${NC}"
-    echo "--------------------------------------------------------------------------------------------------"
-    printf "%-20s %-15s %-15s %-10s %-15s %-20s\n" "ID" "Name" "Type" "Port" "Status" "Created"
-    echo "--------------------------------------------------------------------------------------------------"
-    
-    tail -n +2 "$PAYLOADS_FILE" | grep "|$CURRENT_USER|" | while IFS='|' read -r id name type port status owner created last_conn; do
-        printf "%-20s %-15s %-15s %-10s %-15s %-20s\n" "$id" "$name" "$type" "$port" "$status" "$created"
-    done
-}
-
-# Show credentials for a specific payload
-show_payload_credentials() {
-    echo -e "${BLUE}=== Show Payload Credentials ===${NC}"
-    read -p "Enter Payload ID: " payload_id
-    
-    # Check if user owns this payload
-    if ! grep -q "^$payload_id|.*|$CURRENT_USER|" "$PAYLOADS_FILE"; then
-        echo -e "${RED}❌ Payload not found or you don't have permission!${NC}"
-        return 1
-    fi
-    
-    # Get payload info
-    local payload_info=$(grep "^$payload_id|" "$PAYLOADS_FILE")
-    local payload_name=$(echo "$payload_info" | cut -d'|' -f2)
-    local payload_type=$(echo "$payload_info" | cut -d'|' -f3)
-    local payload_port=$(echo "$payload_info" | cut -d'|' -f4)
-    
-    # Get credentials
-    local creds=$(grep "^$payload_id|" "$PAYLOAD_CREDS_FILE")
-    local service_user=$(echo "$creds" | cut -d'|' -f2)
-    local encoded_pass=$(echo "$creds" | cut -d'|' -f3)
-    local notes=$(echo "$creds" | cut -d'|' -f4)
-    local service_pass=$(echo "$encoded_pass" | base64 -d 2>/dev/null)
-    
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${YELLOW}Payload: $payload_name${NC}"
-    echo -e "${YELLOW}Type: $payload_type${NC}"
-    echo -e "${YELLOW}Port: $payload_port${NC}"
-    echo -e "${GREEN}----------------------------------------${NC}"
-    echo -e "${GREEN}Login Credentials:${NC}"
-    echo -e "  Username: ${BLUE}$service_user${NC}"
-    echo -e "  Password: ${BLUE}$service_pass${NC}"
-    echo -e "  Notes: ${BLUE}$notes${NC}"
-    echo -e "${GREEN}========================================${NC}"
-}
-
-# Connect to a payload (mark as connected and show creds)
-connect_payload() {
-    echo -e "${BLUE}=== Connect to Payload ===${NC}"
-    list_payloads
-    
-    read -p "Enter Payload ID to connect: " payload_id
-    
-    # Check if user owns this payload
-    if ! grep -q "^$payload_id|.*|$CURRENT_USER|" "$PAYLOADS_FILE"; then
-        echo -e "${RED}❌ Payload not found or you don't have permission!${NC}"
-        return 1
-    fi
-    
-    # Show credentials first
-    echo -e "${YELLOW}Retrieving credentials...${NC}"
-    show_payload_credentials
-    
-    # Update status to connected
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    sed -i "s/^$payload_id|\([^|]*\)|\([^|]*\)|\([^|]*\)|disconnected|\([^|]*\)|\([^|]*\)|.*$/$payload_id|\1|\2|\3|connected|\4|\5|$timestamp/" "$PAYLOADS_FILE"
-    
-    echo -e "${GREEN}✅ Payload marked as connected!${NC}"
-    echo -e "${YELLOW}Use the credentials above to connect to your payload.${NC}"
-}
-
-# Disconnect payload
-disconnect_payload() {
-    echo -e "${BLUE}=== Disconnect Payload ===${NC}"
-    read -p "Enter Payload ID: " payload_id
-    
-    if ! grep -q "^$payload_id|.*|$CURRENT_USER|" "$PAYLOADS_FILE"; then
-        echo -e "${RED}❌ Payload not found or you don't have permission!${NC}"
-        return 1
-    fi
-    
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    sed -i "s/^$payload_id|\([^|]*\)|\([^|]*\)|\([^|]*\)|connected|\([^|]*\)|\([^|]*\)|.*$/$payload_id|\1|\2|\3|disconnected|\4|\5|$timestamp/" "$PAYLOADS_FILE"
-    
-    echo -e "${GREEN}✅ Payload disconnected${NC}"
-}
-
-# Show connected payloads
-show_connected() {
-    echo -e "${BLUE}=== Connected Payloads ===${NC}"
-    echo "--------------------------------------------------------------------------------------------------"
-    printf "%-20s %-15s %-15s %-10s %-20s\n" "ID" "Name" "Type" "Port" "Last Connected"
-    echo "--------------------------------------------------------------------------------------------------"
-    
-    tail -n +2 "$PAYLOADS_FILE" | grep "|connected|$CURRENT_USER|" | while IFS='|' read -r id name type port status owner created last_conn; do
-        printf "%-20s %-15s %-15s %-10s %-20s\n" "$id" "$name" "$type" "$port" "$last_conn"
-    done
-}
-
-# Export all my payloads with credentials
-export_my_payloads() {
-    echo -e "${BLUE}=== Export My Payloads ===${NC}"
-    local export_file="$DB_DIR/${CURRENT_USER}_payloads_export_$(date '+%Y%m%d_%H%M%S').txt"
-    
-    echo "=== Payload Export for $CURRENT_USER ===" > "$export_file"
-    echo "Generated: $(date)" >> "$export_file"
-    echo "" >> "$export_file"
-    
-    tail -n +2 "$PAYLOADS_FILE" | grep "|$CURRENT_USER|" | while IFS='|' read -r id name type port status owner created last_conn; do
-        local creds=$(grep "^$id|" "$PAYLOAD_CREDS_FILE")
-        local service_user=$(echo "$creds" | cut -d'|' -f2)
-        local encoded_pass=$(echo "$creds" | cut -d'|' -f3)
-        local notes=$(echo "$creds" | cut -d'|' -f4)
-        local service_pass=$(echo "$encoded_pass" | base64 -d 2>/dev/null)
+        # Captured passwords from targets
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS captured_passwords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_ip TEXT,
+                target_hostname TEXT,
+                username TEXT,
+                password TEXT,
+                source TEXT,
+                captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
-        echo "----------------------------------------" >> "$export_file"
-        echo "Payload: $name (ID: $id)" >> "$export_file"
-        echo "Type: $type | Port: $port | Status: $status" >> "$export_file"
-        echo "Created: $created | Last Connected: $last_conn" >> "$export_file"
-        echo "Credentials:" >> "$export_file"
-        echo "  Username: $service_user" >> "$export_file"
-        echo "  Password: $service_pass" >> "$export_file"
-        echo "  Notes: $notes" >> "$export_file"
-        echo "" >> "$export_file"
-    done
-    
-    chmod 600 "$export_file"
-    echo -e "${GREEN}✅ Exported to: $export_file${NC}"
-}
-
-# Search payloads
-search_payloads() {
-    echo -e "${BLUE}=== Search Payloads ===${NC}"
-    read -p "Search term: " search_term
-    
-    echo "--------------------------------------------------------------------------------------------------"
-    printf "%-20s %-15s %-15s %-10s %-15s\n" "ID" "Name" "Type" "Port" "Status"
-    echo "--------------------------------------------------------------------------------------------------"
-    
-    tail -n +2 "$PAYLOADS_FILE" | grep "|$CURRENT_USER|" | grep -i "$search_term" | while IFS='|' read -r id name type port status owner created last_conn; do
-        printf "%-20s %-15s %-15s %-10s %-15s\n" "$id" "$name" "$type" "$port" "$status"
-    done
-}
-
-# Main menu
-main_menu() {
-    while true; do
-        echo
-        echo -e "${BLUE}╔══════════════════════════════════════════════════╗${NC}"
-        echo -e "${BLUE}║     Payload Database Manager - Main Menu        ║${NC}"
-        echo -e "${BLUE}╚══════════════════════════════════════════════════╝${NC}"
-        echo "1) Login"
-        echo "2) Add New System User"
-        echo "3) Exit"
-        read -p "Choice: " choice
+        conn.commit()
+        conn.close()
         
-        case $choice in
-            1) if login; then payload_menu; fi ;;
-            2) add_user ;;
-            3) exit 0 ;;
-            *) echo -e "${RED}❌ Invalid choice${NC}" ;;
-        esac
-    done
-}
-
-# Payload management menu (after login)
-payload_menu() {
-    while true; do
-        echo
-        echo -e "${GREEN}╔══════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║     Payload Management - Logged in as: $CURRENT_USER     ║${NC}"
-        echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
-        echo "1) Add New Payload (with credentials)"
-        echo "2) List My Payloads"
-        echo "3) Show Payload Credentials"
-        echo "4) Connect to Payload (show creds & mark connected)"
-        echo "5) Show Connected Payloads"
-        echo "6) Disconnect Payload"
-        echo "7) Search Payloads"
-        echo "8) Export All My Payloads"
-        echo "9) Logout"
-        read -p "Choice: " choice
+        # Create default admin if no users
+        self.create_admin()
         
-        case $choice in
-            1) add_payload ;;
-            2) list_payloads ;;
-            3) show_payload_credentials ;;
-            4) connect_payload ;;
-            5) show_connected ;;
-            6) disconnect_payload ;;
-            7) search_payloads ;;
-            8) export_my_payloads ;;
-            9) break ;;
-            *) echo -e "${RED}❌ Invalid choice${NC}" ;;
-        esac
-    done
-}
+    def create_admin(self):
+        """Create default admin account"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            salt = os.urandom(32).hex()
+            password = "admin123"
+            password_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex()
+            cursor.execute("INSERT INTO users (username, password_hash, salt) VALUES (?, ?, ?)",
+                          ("admin", password_hash, salt))
+            conn.commit()
+            print(f"{Colors.GREEN}[+] Created admin: admin / admin123{Colors.RESET}")
+        conn.close()
+        
+    def login(self):
+        """Login system"""
+        attempts = 0
+        while attempts < 3:
+            os.system('clear')
+            print(f"\n{Colors.CYAN}{'='*50}{Colors.RESET}")
+            print(f"{Colors.BOLD}         PAYLOAD DATABASE LOGIN{Colors.RESET}")
+            print(f"{Colors.CYAN}{'='*50}{Colors.RESET}\n")
+            
+            username = input(f"{Colors.WHITE}Username: {Colors.RESET}")
+            password = getpass.getpass(f"{Colors.WHITE}Password: {Colors.RESET}")
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, password_hash, salt FROM users WHERE username = ?", (username,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                user_id, stored_hash, salt = result
+                password_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex()
+                if password_hash == stored_hash:
+                    self.current_user = {"id": user_id, "username": username}
+                    print(f"\n{Colors.GREEN}[+] Welcome back, {username}!{Colors.RESET}")
+                    time.sleep(1)
+                    return True
+                    
+            attempts += 1
+            print(f"\n{Colors.RED}[-] Invalid login. {3 - attempts} attempts left.{Colors.RESET}")
+            time.sleep(1.5)
+            
+        return False
+        
+    def clear_screen(self):
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+    def print_menu(self):
+        """Print main menu"""
+        # Get counts
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM payloads")
+        payload_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM captured_passwords")
+        password_count = cursor.fetchone()[0]
+        conn.close()
+        
+        menu = f"""
+{Colors.CYAN}{'='*60}{Colors.RESET}
+{Colors.BOLD}         PAYLOAD DATABASE{Colors.RESET}
+{Colors.CYAN}{'='*60}{Colors.RESET}
+{Colors.GREEN}[+] User: {self.current_user['username']}{Colors.RESET}
+{Colors.YELLOW}[+] Payloads: {payload_count}{Colors.RESET}
+{Colors.BLUE}[+] Captured Passwords: {password_count}{Colors.RESET}
+{Colors.CYAN}{'='*60}{Colors.RESET}
 
-# Run the application
-clear
-echo -e "${GREEN}🔒 Payload Database Manager v3.0${NC}"
-echo "========================================"
-init_db
-main_menu
+{Colors.GREEN}1.{Colors.RESET} Save Payload
+{Colors.GREEN}2.{Colors.RESET} View Payloads
+{Colors.GREEN}3.{Colors.RESET} View Payload
+{Colors.GREEN}4.{Colors.RESET} Delete Payload
+{Colors.GREEN}5.{Colors.RESET} Save Captured Password
+{Colors.GREEN}6.{Colors.RESET} View Captured Passwords
+{Colors.GREEN}7.{Colors.RESET} Search
+{Colors.GREEN}8.{Colors.RESET} Export All Data
+{Colors.GREEN}0.{Colors.RESET} Logout
+
+{Colors.CYAN}{'='*60}{Colors.RESET}
+"""
+        print(menu)
+        
+    def save_payload(self):
+        """Save a payload"""
+        print(f"\n{Colors.CYAN}[*] Save Payload{Colors.RESET}\n")
+        
+        name = input(f"{Colors.WHITE}Payload Name: {Colors.RESET}")
+        ptype = input(f"{Colors.WHITE}Type (ps1/exe/py/bash): {Colors.RESET}")
+        lhost = input(f"{Colors.WHITE}LHOST: {Colors.RESET}")
+        lport = input(f"{Colors.WHITE}LPORT: {Colors.RESET}")
+        
+        print(f"{Colors.YELLOW}[!] Paste your payload (end with 'END' on new line):{Colors.RESET}")
+        lines = []
+        while True:
+            line = input()
+            if line == "END":
+                break
+            lines.append(line)
+        payload = "\n".join(lines)
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO payloads (name, type, lhost, lport, payload, created_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (name, ptype, lhost, lport, payload, self.current_user['username']))
+        conn.commit()
+        conn.close()
+        
+        print(f"{Colors.GREEN}[+] Payload saved!{Colors.RESET}")
+        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def view_payloads(self):
+        """View all payloads"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, type, lhost, lport, created_at FROM payloads ORDER BY id DESC")
+        payloads = cursor.fetchall()
+        conn.close()
+        
+        self.clear_screen()
+        print(f"\n{Colors.CYAN}{'='*80}{Colors.RESET}")
+        print(f"{Colors.BOLD}              PAYLOADS{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*80}{Colors.RESET}\n")
+        
+        if not payloads:
+            print(f"{Colors.YELLOW}[!] No payloads{Colors.RESET}")
+        else:
+            print(f"{Colors.GREEN}{'ID':<4} {'Name':<20} {'Type':<10} {'LHOST':<16} {'LPORT':<8} {'Created':<20}{Colors.RESET}")
+            print(f"{Colors.DIM}{'-'*80}{Colors.RESET}")
+            for p in payloads:
+                print(f"{p[0]:<4} {p[1]:<20} {p[2]:<10} {p[3] or '-':<16} {p[4] or '-':<8} {str(p[5])[:19]:<20}")
+                
+        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def view_payload(self):
+        """View a single payload"""
+        pid = input(f"\n{Colors.WHITE}Payload ID: {Colors.RESET}")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, type, lhost, lport, payload, created_at FROM payloads WHERE id = ?", (pid,))
+        p = cursor.fetchone()
+        conn.close()
+        
+        if not p:
+            print(f"{Colors.RED}[-] Payload not found{Colors.RESET}")
+            input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+            return
+            
+        self.clear_screen()
+        print(f"\n{Colors.CYAN}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}  {p[1]}{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*60}{Colors.RESET}")
+        print(f"{Colors.YELLOW}ID:{Colors.RESET} {p[0]}")
+        print(f"{Colors.YELLOW}Type:{Colors.RESET} {p[2]}")
+        print(f"{Colors.YELLOW}LHOST:{Colors.RESET} {p[3]}")
+        print(f"{Colors.YELLOW}LPORT:{Colors.RESET} {p[4]}")
+        print(f"{Colors.YELLOW}Created:{Colors.RESET} {p[6]}")
+        print(f"{Colors.CYAN}{'-'*60}{Colors.RESET}")
+        print(f"{Colors.GREEN}Payload:{Colors.RESET}\n{p[5]}")
+        print(f"{Colors.CYAN}{'='*60}{Colors.RESET}\n")
+        
+        # Option to copy
+        copy = input(f"{Colors.WHITE}Copy to clipboard? (y/n): {Colors.RESET}")
+        if copy.lower() == 'y':
+            import subprocess
+            subprocess.run("pbcopy", input=p[5].encode(), text=True)
+            print(f"{Colors.GREEN}[+] Copied!{Colors.RESET}")
+            
+        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def delete_payload(self):
+        """Delete a payload"""
+        pid = input(f"\n{Colors.WHITE}Payload ID to delete: {Colors.RESET}")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM payloads WHERE id = ?", (pid,))
+        conn.commit()
+        conn.close()
+        
+        print(f"{Colors.GREEN}[+] Payload deleted{Colors.RESET}")
+        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def save_password(self):
+        """Save a captured password from target"""
+        print(f"\n{Colors.CYAN}[*] Save Captured Password{Colors.RESET}\n")
+        
+        target_ip = input(f"{Colors.WHITE}Target IP: {Colors.RESET}")
+        target_hostname = input(f"{Colors.WHITE}Hostname: {Colors.RESET}")
+        username = input(f"{Colors.WHITE}Username: {Colors.RESET}")
+        password = input(f"{Colors.WHITE}Password: {Colors.RESET}")
+        source = input(f"{Colors.WHITE}Source (browser/wifi/keylogger/etc): {Colors.RESET}")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO captured_passwords (target_ip, target_hostname, username, password, source)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (target_ip, target_hostname, username, password, source))
+        conn.commit()
+        conn.close()
+        
+        print(f"{Colors.GREEN}[+] Password saved!{Colors.RESET}")
+        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def view_passwords(self):
+        """View all captured passwords"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, target_ip, target_hostname, username, password, source, captured_at FROM captured_passwords ORDER BY id DESC")
+        passwords = cursor.fetchall()
+        conn.close()
+        
+        self.clear_screen()
+        print(f"\n{Colors.CYAN}{'='*100}{Colors.RESET}")
+        print(f"{Colors.BOLD}              CAPTURED PASSWORDS{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*100}{Colors.RESET}\n")
+        
+        if not passwords:
+            print(f"{Colors.YELLOW}[!] No passwords captured yet{Colors.RESET}")
+        else:
+            print(f"{Colors.GREEN}{'ID':<4} {'IP':<16} {'Hostname':<20} {'Username':<20} {'Password':<20} {'Source':<12} {'Date':<20}{Colors.RESET}")
+            print(f"{Colors.DIM}{'-'*100}{Colors.RESET}")
+            for p in passwords:
+                print(f"{p[0]:<4} {p[1]:<16} {p[2]:<20} {p[3]:<20} {p[4]:<20} {p[5]:<12} {str(p[6])[:19]:<20}")
+                
+        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def search(self):
+        """Search payloads and passwords"""
+        keyword = input(f"\n{Colors.WHITE}Search keyword: {Colors.RESET}")
+        
+        self.clear_screen()
+        print(f"\n{Colors.CYAN}{'='*80}{Colors.RESET}")
+        print(f"{Colors.BOLD}     SEARCH RESULTS FOR '{keyword}'{Colors.RESET}")
+        print(f"{Colors.CYAN}{'='*80}{Colors.RESET}\n")
+        
+        # Search payloads
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, type, lhost, lport FROM payloads WHERE name LIKE ? OR payload LIKE ?", 
+                      (f'%{keyword}%', f'%{keyword}%'))
+        payloads = cursor.fetchall()
+        
+        if payloads:
+            print(f"{Colors.GREEN}[PAYLOADS]{Colors.RESET}")
+            for p in payloads:
+                print(f"  [{p[0]}] {p[1]} ({p[2]}) - {p[3]}:{p[4]}")
+                
+        # Search passwords
+        cursor.execute("SELECT id, target_ip, target_hostname, username, password FROM captured_passwords WHERE username LIKE ? OR password LIKE ? OR source LIKE ?",
+                      (f'%{keyword}%', f'%{keyword}%', f'%{keyword}%'))
+        passwords = cursor.fetchall()
+        
+        if passwords:
+            print(f"\n{Colors.YELLOW}[PASSWORDS]{Colors.RESET}")
+            for p in passwords:
+                print(f"  [{p[0]}] {p[1]} - {p[2]} - {p[3]}:{p[4]}")
+                
+        if not payloads and not passwords:
+            print(f"{Colors.RED}[!] No results{Colors.RESET}")
+            
+        conn.close()
+        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def export(self):
+        """Export all data to JSON"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM payloads")
+        payloads = cursor.fetchall()
+        cursor.execute("SELECT * FROM captured_passwords")
+        passwords = cursor.fetchall()
+        conn.close()
+        
+        data = {
+            "export_date": str(datetime.now()),
+            "user": self.current_user['username'],
+            "payloads": payloads,
+            "captured_passwords": passwords
+        }
+        
+        filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, 'w') as f:
+            json.dump(data, f, default=str, indent=2)
+            
+        print(f"{Colors.GREEN}[+] Exported to {filename}{Colors.RESET}")
+        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def change_password(self):
+        """Change user password"""
+        print(f"\n{Colors.CYAN}[*] Change Password{Colors.RESET}\n")
+        
+        current = getpass.getpass(f"{Colors.WHITE}Current Password: {Colors.RESET}")
+        new = getpass.getpass(f"{Colors.WHITE}New Password: {Colors.RESET}")
+        confirm = getpass.getpass(f"{Colors.WHITE}Confirm: {Colors.RESET}")
+        
+        if new != confirm:
+            print(f"{Colors.RED}[-] Passwords don't match{Colors.RESET}")
+            input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+            return
+            
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT salt FROM users WHERE username = ?", (self.current_user['username'],))
+        result = cursor.fetchone()
+        
+        if result:
+            salt = result[0]
+            current_hash = hashlib.pbkdf2_hmac('sha256', current.encode(), salt.encode(), 100000).hex()
+            cursor.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", 
+                          (self.current_user['username'], current_hash))
+            if cursor.fetchone():
+                new_hash = hashlib.pbkdf2_hmac('sha256', new.encode(), salt.encode(), 100000).hex()
+                cursor.execute("UPDATE users SET password_hash = ? WHERE username = ?", 
+                              (new_hash, self.current_user['username']))
+                conn.commit()
+                print(f"{Colors.GREEN}[+] Password changed!{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}[-] Current password incorrect{Colors.RESET}")
+        conn.close()
+        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+        
+    def run(self):
+        """Main loop"""
+        if not self.login():
+            print(f"{Colors.RED}[-] Too many failed attempts{Colors.RESET}")
+            sys.exit(1)
+            
+        while True:
+            self.clear_screen()
+            self.print_menu()
+            
+            choice = input(f"{Colors.GREEN}choice>{Colors.RESET} ").strip()
+            
+            if choice == "0":
+                print(f"{Colors.GREEN}[+] Goodbye!{Colors.RESET}")
+                break
+            elif choice == "1":
+                self.save_payload()
+            elif choice == "2":
+                self.view_payloads()
+            elif choice == "3":
+                self.view_payload()
+            elif choice == "4":
+                self.delete_payload()
+            elif choice == "5":
+                self.save_password()
+            elif choice == "6":
+                self.view_passwords()
+            elif choice == "7":
+                self.search()
+            elif choice == "8":
+                self.export()
+            elif choice == "passwd":
+                self.change_password()
+            else:
+                print(f"{Colors.RED}[-] Invalid choice{Colors.RESET}")
+                time.sleep(1)
+
+if __name__ == "__main__":
+    import time
+    db = PayloadDatabase()
+    db.run()
