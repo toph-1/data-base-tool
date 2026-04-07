@@ -1,0 +1,55 @@
+$ ./payload_manager.sh
+
+╔══════════════════════════════════════════════════╗
+║     Payload Database Manager - Main Menu        ║
+╚══════════════════════════════════════════════════╝
+1) Login
+2) Add New System User
+3) Exit
+Choice: 2
+Username: hacker1
+Password: 
+Confirm password: 
+✅ User hacker1 added successfully!
+
+Choice: 1
+Username: hacker1
+Password: 
+✅ Login successful!
+
+╔══════════════════════════════════════════════════╗
+║     Payload Management - Logged in as: hacker1     ║
+╚══════════════════════════════════════════════════╝
+1) Add New Payload (with credentials)
+2) List My Payloads
+3) Show Payload Credentials
+4) Connect to Payload
+...
+
+Choice: 1
+=== Add New Payload ===
+Payload name: Corporate Web Server
+Payload type (meterpreter/shell/ssh/web): ssh
+IP/Hostname: 192.168.1.100
+Port: 22
+--- Credentials for this payload ---
+Service username (e.g., root, admin): root
+Service password: MySecretPass123
+Additional notes (optional): Production server
+
+✅ Payload added successfully!
+Payload ID: a7f3e9c2b4d1a8f6
+
+Choice: 4
+=== Connect to Payload ===
+Enter Payload ID: a7f3e9c2b4d1a8f6
+========================================
+Payload: Corporate Web Server
+Type: ssh
+Port: 22
+----------------------------------------
+Login Credentials:
+  Username: root
+  Password: MySecretPass123
+========================================
+✅ Payload marked as connected!
